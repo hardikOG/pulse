@@ -40,6 +40,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from consumer.aggregator import Rollup, bucket_for, compute_rollup, is_error
+from consumer.detection import run_detection_for_bucket
 from core.config import Settings, get_settings
 from core.logging import get_logger
 from core.redis_client import make_redis_client
@@ -271,16 +272,20 @@ async def _flush_and_ack(
     message_ids: list[str],
     touched: set[BucketKey],
 ) -> None:
-    """Upsert every touched bucket's full current rollup, then ack iff all succeeded.
+    """Upsert every touched bucket's rollup, run anomaly detection, then ack iff upserts succeeded.
 
     Purpose: the durability boundary — a message is only acked once every bucket it
         contributed to has been durably persisted, giving at-least-once semantics.
+        Anomaly detection (Phase 4) runs after a successful upsert, once per touched
+        bucket, but is best-effort: a detection failure is logged and does not affect
+        whether the batch gets acked, since that guarantee covers raw metrics data,
+        not derived analysis (see consumer/detection.py).
     Inputs: redis_client; session_factory; settings; logger; buckets — accumulator
         dict (read, not mutated here); message_ids — this batch's stream entry IDs;
         touched — bucket keys this batch added data to.
     Outputs: None.
     Complexity: one Postgres transaction covering all of len(touched) buckets, plus
-        one XACK call.
+        one detection pass per bucket, plus one XACK call.
     Failure cases: if the batch's transaction fails after retries, none of this
         batch's messages are acked — they remain pending and are redelivered on the
         next startup's pending-drain (or, if the consumer keeps running, on a future
@@ -292,6 +297,10 @@ async def _flush_and_ack(
         for bucket_key in touched
     }
     all_ok = _upsert_rollups_batch(session_factory, bucket_rollups, settings, logger)
+
+    if all_ok:
+        for bucket_key, rollup in bucket_rollups.items():
+            run_detection_for_bucket(session_factory, bucket_key, rollup, settings, logger)
 
     if not message_ids:
         return

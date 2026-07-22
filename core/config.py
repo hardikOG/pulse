@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     zscore_threshold: float = 3.0
     ewma_alpha: float = 0.3
     isolation_forest_contamination: float = 0.05
+    min_history_buckets: int = 10
+    # IsolationForest needs more samples than the statistical detectors to reliably
+    # isolate an outlier (see docs/private/ARCHITECTURE_LEDGER.md — measured, not
+    # assumed: n=10 demonstrably missed an obvious injected spike that zscore/ewma
+    # both caught).
+    isolation_forest_min_history: int = 30
 
     # Alerts (Phase 5 onward)
     webhook_url: str | None = None

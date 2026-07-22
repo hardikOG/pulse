@@ -27,6 +27,25 @@ class Metric(Base):
         constraint — the consumer must upsert, not insert, on conflict.
     """
 
+    # Index rationale — verified with EXPLAIN ANALYZE against ~220k rows, not just
+    # justified a priori (see docs/private/ARCHITECTURE_LEDGER.md for the full plans):
+    #   uq_metrics_bucket (minute_bucket, service, endpoint): required as the upsert's
+    #     ON CONFLICT target; minute_bucket leads, so it also serves time-range-only
+    #     queries with no service predicate (GET /services, GET /endpoints without a
+    #     service filter) — confirmed via Bitmap Index Scan in EXPLAIN ANALYZE. A
+    #     separate bare minute_bucket index would be redundant with this one.
+    #   ix_metrics_service_bucket (service, minute_bucket): serves exact-service +
+    #     time-range queries (GET /services/{service}/metrics, GET /endpoints?service=X)
+    #     — confirmed via Bitmap Index Scan. Not redundant with uq_metrics_bucket:
+    #     minute_bucket is that index's 3rd column, so it can't be range-scanned there
+    #     without endpoint also being fixed.
+    #   A third index on (service, endpoint, minute_bucket) was added on the theory it
+    #     would help GET /endpoints' GROUP BY (service, endpoint), then measured and
+    #     REMOVED: EXPLAIN ANALYZE showed Postgres prefers a HashAggregate over
+    #     ix_metrics_service_bucket's bitmap scan rather than an ordered scan of the
+    #     3-column index, since the group count (one per distinct endpoint) is small
+    #     regardless of row count. Kept out rather than left in unproven — an unused
+    #     index is pure write-path cost, not a hedge.
     __tablename__ = "metrics"
     __table_args__ = (
         UniqueConstraint("minute_bucket", "service", "endpoint", name="uq_metrics_bucket"),

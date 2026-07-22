@@ -12,7 +12,20 @@ that bucket from only the redelivered messages (the in-memory sample from before
 crash is gone) and re-upserts, which can under-represent that one bucket by at most one
 batch's worth of events. Closing this completely would require a durable per-bucket
 watermark (a schema change) or a transactional outbox — out of scope for the fixed
-schema and lightweight-infra constraints (see docs/private/ARCHITECTURE_LEDGER.md).
+schema and lightweight-infra constraints (see docs/private/ARCHITECTURE_LEDGER.md,
+Future Improvement #1).
+
+All buckets a single batch touches are upserted in one Postgres transaction (not one
+transaction per bucket) — see _upsert_rollups_batch.
+
+Memory: each accumulated latency value costs ~32 bytes (a 24-byte Python float object
+plus an 8-byte list pointer). Total consumer memory is O(events currently held across
+all open + grace-period buckets) — proportional to event volume in that window, not to
+the number of distinct buckets. At very high per-bucket cardinality (see
+ARCHITECTURE_LEDGER.md) this is a real, bounded-for-now scaling limit; the production
+fix (streaming percentile approximation, e.g. t-digest) is a named Future Improvement,
+not something silently substituted here in place of the "honest percentile" the
+project's design explicitly asks for at this scale.
 """
 
 import asyncio
@@ -81,24 +94,15 @@ def _parse_event(fields: dict[str, str], logger) -> EventIn | None:
         return None
 
 
-def _upsert_rollup(
-    session_factory: sessionmaker[Session],
-    bucket_key: BucketKey,
-    rollup: Rollup,
-    settings: Settings,
-    logger,
-) -> bool:
-    """Upsert one bucket's rollup into the metrics table, retrying on transient failure.
+def _build_upsert_statement(bucket_key: BucketKey, rollup: Rollup):
+    """Build (without executing) the ON CONFLICT upsert statement for one bucket.
 
-    Purpose: durable persistence step for one bucket's aggregate — the boundary after
-        which a message covering this bucket is safe to XACK.
-    Inputs: session_factory — SQLAlchemy sessionmaker; bucket_key — (minute_bucket,
-        service, endpoint); rollup — the computed Rollup; settings — provides retry
-        count/backoff; logger.
-    Outputs: True if the upsert committed, False if all retries were exhausted.
-    Complexity: O(1) per attempt, up to settings.postgres_max_retries attempts.
-    Failure cases: never raises — SQLAlchemyError is caught and retried with linear
-        backoff; returns False (not an exception) so the caller can decide not to ack.
+    Purpose: pure statement construction, separated from execution so a whole batch's
+        statements can be gathered and executed together in a single transaction.
+    Inputs: bucket_key — (minute_bucket, service, endpoint); rollup — computed Rollup.
+    Outputs: a SQLAlchemy postgresql Insert with ON CONFLICT DO UPDATE configured.
+    Complexity: O(1).
+    Failure cases: none.
     """
     minute_bucket, service, endpoint = bucket_key
     stmt = pg_insert(Metric).values(
@@ -111,7 +115,7 @@ def _upsert_rollup(
         p95=rollup.p95,
         p99=rollup.p99,
     )
-    stmt = stmt.on_conflict_do_update(
+    return stmt.on_conflict_do_update(
         index_elements=["minute_bucket", "service", "endpoint"],
         set_={
             "request_count": stmt.excluded.request_count,
@@ -121,19 +125,46 @@ def _upsert_rollup(
             "p99": stmt.excluded.p99,
         },
     )
+
+
+def _upsert_rollups_batch(
+    session_factory: sessionmaker[Session],
+    bucket_rollups: dict[BucketKey, Rollup],
+    settings: Settings,
+    logger,
+) -> bool:
+    """Upsert every bucket a batch touched in a single transaction, retrying as a whole.
+
+    Purpose: the durability boundary for one batch — one round trip and one commit for
+        however many buckets the batch touched (typically 1-3), not one transaction
+        per bucket. Since a batch is only acked when every touched bucket's upsert
+        succeeds anyway, doing them in one transaction costs nothing in correctness
+        and saves the round trips a per-bucket transaction would spend.
+    Inputs: session_factory; bucket_rollups — every bucket this batch touched, mapped
+        to its freshly computed Rollup; settings — retry count/backoff; logger.
+    Outputs: True if the whole batch committed, False if all retries were exhausted.
+    Complexity: O(b) statements executed per attempt, where b = len(bucket_rollups),
+        up to settings.postgres_max_retries attempts.
+    Failure cases: never raises — SQLAlchemyError is caught and the whole batch is
+        retried with linear backoff; returns False so the caller does not ack.
+    """
+    statements = [
+        _build_upsert_statement(bucket_key, rollup)
+        for bucket_key, rollup in bucket_rollups.items()
+    ]
     for attempt in range(1, settings.postgres_max_retries + 1):
         try:
             with session_scope(session_factory) as session:
-                session.execute(stmt)
+                for stmt in statements:
+                    session.execute(stmt)
             return True
         except SQLAlchemyError as exc:
             logger.error(
-                "postgres upsert failed",
+                "postgres batch upsert failed",
                 extra={
                     "extra_fields": {
                         "attempt": attempt,
-                        "service": service,
-                        "endpoint": endpoint,
+                        "bucket_count": len(statements),
                         "error": str(exc),
                     }
                 },
@@ -248,20 +279,19 @@ async def _flush_and_ack(
         dict (read, not mutated here); message_ids — this batch's stream entry IDs;
         touched — bucket keys this batch added data to.
     Outputs: None.
-    Complexity: O(b) Postgres upserts where b = len(touched), plus one XACK call.
-    Failure cases: if any bucket's upsert fails after retries, none of this batch's
-        messages are acked — they remain pending and are redelivered on the next
-        startup's pending-drain (or, if the consumer keeps running, on a future
+    Complexity: one Postgres transaction covering all of len(touched) buckets, plus
+        one XACK call.
+    Failure cases: if the batch's transaction fails after retries, none of this
+        batch's messages are acked — they remain pending and are redelivered on the
+        next startup's pending-drain (or, if the consumer keeps running, on a future
         XREADGROUP with id="0"), so the batch is retried as a whole rather than
-        silently losing the failed bucket's contribution.
+        silently losing any bucket's contribution.
     """
-    all_ok = True
-    for bucket_key in touched:
-        rollup = compute_rollup(
-            buckets[bucket_key].latencies, buckets[bucket_key].error_count
-        )
-        if not _upsert_rollup(session_factory, bucket_key, rollup, settings, logger):
-            all_ok = False
+    bucket_rollups = {
+        bucket_key: compute_rollup(buckets[bucket_key].latencies, buckets[bucket_key].error_count)
+        for bucket_key in touched
+    }
+    all_ok = _upsert_rollups_batch(session_factory, bucket_rollups, settings, logger)
 
     if not message_ids:
         return

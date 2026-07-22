@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     consumer_name: str = "consumer-1"
     stream_batch_size: int = 200
     stream_block_timeout_ms: int = 5000
+    redis_socket_timeout_seconds: float = 2.0
 
     # Aggregation (Phase 2 onward)
     aggregation_window_seconds: int = 60

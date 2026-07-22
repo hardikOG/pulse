@@ -29,7 +29,9 @@ project's design explicitly asks for at this scale.
 """
 
 import asyncio
+import itertools
 import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -41,11 +43,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from consumer.aggregator import Rollup, bucket_for, compute_rollup, is_error
-from consumer.broadcast import build_metric_point_message, publish
+from consumer.broadcast import build_lag_message, build_metric_point_message, publish
 from consumer.detection import run_detection_for_bucket
 from core.config import Settings, get_settings
 from core.logging import get_logger
 from core.redis_client import make_redis_client
+from core.redis_lag import get_lag_info
 from db.models import Base, Metric
 from db.session import make_engine, make_session_factory, session_scope
 from schemas import EventIn
@@ -275,6 +278,7 @@ async def _flush_and_ack(
     touched: set[BucketKey],
     httpx_client: httpx.AsyncClient,
     background_tasks: set[asyncio.Task],
+    sequence_counter: Iterator[int],
 ) -> None:
     """Upsert every touched bucket's rollup, publish live updates, run detection, ack.
 
@@ -288,7 +292,10 @@ async def _flush_and_ack(
     Inputs: redis_client; session_factory; settings; logger; buckets — accumulator
         dict (read, not mutated here); message_ids — this batch's stream entry IDs;
         touched — bucket keys this batch added data to; httpx_client — shared client
-        for webhook delivery; background_tasks — in-flight webhook task tracking set.
+        for webhook delivery; background_tasks — in-flight webhook task tracking set;
+        sequence_counter — shared itertools.count() (owned by _run_async, not a
+        module-level global) stamping each metric_point message with a monotonically
+        increasing number so the dashboard can discard stale/out-of-order messages.
     Outputs: None.
     Complexity: one Postgres transaction covering all of len(touched) buckets, plus
         one live-update publish and one detection pass per bucket, plus one XACK call.
@@ -316,6 +323,7 @@ async def _flush_and_ack(
                 rollup.p50,
                 rollup.p95,
                 rollup.p99,
+                next(sequence_counter),
             )
             await publish(redis_client, settings.live_updates_channel, live_message, logger)
             await run_detection_for_bucket(
@@ -344,6 +352,34 @@ async def _flush_and_ack(
         )
 
 
+async def _report_lag(redis_client: Redis, settings: Settings, logger) -> None:
+    """Fetch and publish/log current consumer-group lag, best-effort.
+
+    Purpose: periodic operational visibility into queue health — "is the consumer
+        keeping up, or is the stream backing up?" — called once per poll cycle
+        (whether or not that cycle had any messages) from the steady-state loop.
+    Inputs: redis_client; settings — provides event_stream/consumer_group/
+        live_updates_channel; logger.
+    Outputs: None — publishes a "lag" live-update message and logs the snapshot.
+    Complexity: O(1) (see core.redis_lag.get_lag_info).
+    Failure cases: never raises — get_lag_info and publish are both already
+        best-effort internally.
+    """
+    lag_info = await get_lag_info(redis_client, settings.event_stream, settings.consumer_group)
+    logger.info(
+        "consumer lag",
+        extra={
+            "extra_fields": {
+                "stream_length": lag_info.stream_length,
+                "pending_count": lag_info.pending_count,
+                "lag": lag_info.lag,
+            }
+        },
+    )
+    message = build_lag_message(lag_info.stream_length, lag_info.pending_count, lag_info.lag)
+    await publish(redis_client, settings.live_updates_channel, message, logger)
+
+
 async def _drain_pending(
     redis_client: Redis,
     session_factory: sessionmaker[Session],
@@ -352,6 +388,7 @@ async def _drain_pending(
     buckets: dict[BucketKey, _BucketAccumulator],
     httpx_client: httpx.AsyncClient,
     background_tasks: set[asyncio.Task],
+    sequence_counter: Iterator[int],
 ) -> None:
     """Replay this consumer's own previously-delivered-but-unacked entries.
 
@@ -401,6 +438,7 @@ async def _drain_pending(
             touched,
             httpx_client,
             background_tasks,
+            sequence_counter,
         )
         drained += len(entries)
 
@@ -431,13 +469,23 @@ async def _run_async(settings: Settings, logger) -> None:
     # collected mid-flight (a known asyncio pitfall) — each task discards itself on
     # completion via add_done_callback.
     background_tasks: set[asyncio.Task] = set()
+    # Per-process monotonic counter stamped onto every metric_point live-update
+    # message (see consumer/broadcast.py) — owned here, not a module-level global.
+    sequence_counter = itertools.count()
 
     async with httpx.AsyncClient() as httpx_client:
         await _ensure_consumer_group(redis_client, settings, logger)
 
         buckets: dict[BucketKey, _BucketAccumulator] = {}
         await _drain_pending(
-            redis_client, session_factory, settings, logger, buckets, httpx_client, background_tasks
+            redis_client,
+            session_factory,
+            settings,
+            logger,
+            buckets,
+            httpx_client,
+            background_tasks,
+            sequence_counter,
         )
 
         logger.info("consumer entering steady state", extra={"extra_fields": {}})
@@ -458,6 +506,7 @@ async def _run_async(settings: Settings, logger) -> None:
 
             if not response:
                 _evict_stale_buckets(buckets, settings, logger)
+                await _report_lag(redis_client, settings, logger)
                 continue
 
             batch_start = time.perf_counter()
@@ -473,6 +522,7 @@ async def _run_async(settings: Settings, logger) -> None:
                 touched,
                 httpx_client,
                 background_tasks,
+                sequence_counter,
             )
             elapsed_ms = (time.perf_counter() - batch_start) * 1000
             logger.info(
@@ -486,6 +536,7 @@ async def _run_async(settings: Settings, logger) -> None:
                 },
             )
             _evict_stale_buckets(buckets, settings, logger)
+            await _report_lag(redis_client, settings, logger)
 
 
 def run() -> None:

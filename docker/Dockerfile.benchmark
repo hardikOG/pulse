@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY benchmark ./benchmark
+COPY simulator ./simulator
+COPY core ./core
+COPY db ./db
+COPY schemas.py .
+
+ENTRYPOINT ["python", "-m", "benchmark.run"]

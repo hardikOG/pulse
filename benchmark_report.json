@@ -1,0 +1,100 @@
+{
+  "scenario_name": "steady",
+  "run_timestamp": "2026-07-22T21:49:03.832290+00:00",
+  "system": {
+    "os_name": "Linux 6.18.33.2-microsoft-standard-WSL2",
+    "python_version": "3.11.15",
+    "cpu_count": 12,
+    "total_memory_mb": 7792.62890625,
+    "hardware": "x86_64"
+  },
+  "operational": {
+    "redis_used_memory_mb": 2.3445510864257812,
+    "redis_ops_per_sec": 0.0,
+    "postgres_size_mb": 8.780295372009277,
+    "peak_pending_count": 7,
+    "peak_lag": 6
+  },
+  "pipeline": {
+    "api_ingest_events_per_sec": 540.3352619753268,
+    "consumer_processed_events_per_sec": 540.3352619753268,
+    "note": "API ingest throughput and Redis XADD throughput are the same measurement here, not two separate numbers: POST /events awaits XADD synchronously before returning, so accepted-per-second already IS Redis-write-per-second. Consumer processed throughput is measured independently, from Postgres (total request_count aggregated within the run window / wall-clock duration) \u2014 the gap between it and API ingest throughput (if any) is the honest signal for consumer backpressure, not an assumption that they match."
+  },
+  "timeline": [
+    {
+      "label": "warmup started",
+      "offset_seconds": 0.028141560999983994
+    },
+    {
+      "label": "warmup finished",
+      "offset_seconds": 4.426648161999992
+    },
+    {
+      "label": "throughput burst finished",
+      "offset_seconds": 19.491395582999985
+    },
+    {
+      "label": "live phase started",
+      "offset_seconds": 19.491402517000097
+    },
+    {
+      "label": "live phase finished",
+      "offset_seconds": 259.53791176000004
+    },
+    {
+      "label": "grace period elapsed",
+      "offset_seconds": 274.55284912599996
+    }
+  ],
+  "throughput_duration_seconds": 15.064721059000021,
+  "throughput_events_sent": 8140,
+  "throughput_events_failed": 0,
+  "throughput_latency": {
+    "count": 8140,
+    "avg_ms": 92.27991404693118,
+    "p50_ms": 62.23770299993703,
+    "p95_ms": 267.58032899988393,
+    "p99_ms": 428.8940789999742
+  },
+  "throughput_variance": {
+    "per_second_counts": [
+      460,
+      566,
+      537,
+      495,
+      570,
+      560,
+      559,
+      552,
+      550,
+      564,
+      542,
+      549,
+      538,
+      507,
+      591
+    ],
+    "mean": 542.6666666666666,
+    "stddev": 31.899146627387317,
+    "minimum": 460,
+    "maximum": 591
+  },
+  "live_duration_seconds": 240.0464015739999,
+  "live_events_sent": 4542,
+  "live_events_failed": 0,
+  "live_latency": {
+    "count": 4542,
+    "avg_ms": 2.5415576171285044,
+    "p50_ms": 2.4757009998666035,
+    "p95_ms": 3.044935999923837,
+    "p99_ms": 3.3196179999777087
+  },
+  "detection": {
+    "true_positives": 3,
+    "false_positives": 21,
+    "false_negatives": 0,
+    "precision": 0.125,
+    "recall": 1.0
+  },
+  "warmup_events_sent": 1920
+}

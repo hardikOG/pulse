@@ -7,15 +7,21 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from redis.exceptions import RedisError
 
-from consumer.broadcast import build_anomaly_message, build_metric_point_message, publish
+from consumer.broadcast import (
+    build_anomaly_message,
+    build_lag_message,
+    build_metric_point_message,
+    publish,
+)
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 def test_build_metric_point_message_shape() -> None:
-    message = build_metric_point_message("checkout", "/pay", NOW, 100, 5, 40.0, 90.0, 110.0)
+    message = build_metric_point_message("checkout", "/pay", NOW, 100, 5, 40.0, 90.0, 110.0, 42)
     assert message == {
         "type": "metric_point",
+        "sequence": 42,
         "service": "checkout",
         "endpoint": "/pay",
         "minute_bucket": NOW.isoformat(),
@@ -25,6 +31,16 @@ def test_build_metric_point_message_shape() -> None:
         "p95": 90.0,
         "p99": 110.0,
     }
+
+
+def test_build_lag_message_shape() -> None:
+    message = build_lag_message(120, 5, 3)
+    assert message == {"type": "lag", "stream_length": 120, "pending_count": 5, "lag": 3}
+
+
+def test_build_lag_message_allows_none_lag() -> None:
+    message = build_lag_message(0, 0, None)
+    assert message["lag"] is None
 
 
 def test_build_anomaly_message_shape() -> None:

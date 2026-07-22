@@ -23,19 +23,24 @@ def build_metric_point_message(
     p50: float,
     p95: float,
     p99: float,
+    sequence: int,
 ) -> dict[str, Any]:
     """Build an incremental 'metric_point' live-update message for one bucket.
 
     Purpose: wire format for a single rollup update — the dashboard's steady-state
         broadcast unit (see the incremental-vs-snapshot ledger entry for why this is
         small and per-bucket rather than a full dashboard snapshot).
-    Inputs: mirrors one metrics table row.
+    Inputs: mirrors one metrics table row; sequence — a per-process, monotonically
+        increasing counter (see consumer/main.py) letting the client detect and
+        discard stale/out-of-order messages (Pub/Sub gives no ordering guarantee
+        across a reconnect) rather than blindly applying whatever arrives last.
     Outputs: a JSON-serializable dict with a "type" discriminator for the client.
     Complexity: O(1).
     Failure cases: none.
     """
     return {
         "type": "metric_point",
+        "sequence": sequence,
         "service": service,
         "endpoint": endpoint,
         "minute_bucket": minute_bucket.isoformat(),
@@ -77,6 +82,26 @@ def build_anomaly_message(
         "score": score,
         "reason": reason,
         "created_at": created_at.isoformat(),
+    }
+
+
+def build_lag_message(stream_length: int, pending_count: int, lag: int | None) -> dict[str, Any]:
+    """Build a 'lag' live-update message reporting consumer-group health.
+
+    Purpose: wire format for the dashboard's live queue-health indicator — the
+        operational visibility question "is the consumer keeping up?" (see
+        core/redis_lag.py).
+    Inputs: a LagInfo's fields, passed individually to keep this module free of a
+        dependency on core.redis_lag's dataclass.
+    Outputs: a JSON-serializable dict with a "type" discriminator for the client.
+    Complexity: O(1).
+    Failure cases: none.
+    """
+    return {
+        "type": "lag",
+        "stream_length": stream_length,
+        "pending_count": pending_count,
+        "lag": lag,
     }
 
 

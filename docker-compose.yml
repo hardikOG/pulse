@@ -66,5 +66,25 @@ services:
       redis:
         condition: service_healthy
 
+  benchmark:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.benchmark
+    profiles: ["benchmark"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pulse}:${POSTGRES_PASSWORD:-pulse}@postgres:5432/${POSTGRES_DB:-pulse}
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./:/host
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
 volumes:
   postgres_data:

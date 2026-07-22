@@ -103,7 +103,10 @@
 <body>
 <header>
   <h1>Pulse</h1>
-  <span id="status">connecting…</span>
+  <div style="display:flex; gap:10px; align-items:center;">
+    <span id="lag" class="empty" style="font-size:12px;"></span>
+    <span id="status">connecting…</span>
+  </div>
 </header>
 <main>
   <section>
@@ -218,7 +221,7 @@ function createEndpointChart(endpoint, points) {
       plugins: { legend: { labels: { color: "#8b93a7" } } },
     },
   });
-  endpointCharts.set(endpoint, { chart, points });
+  endpointCharts.set(endpoint, { chart, points, lastSequence: -1 });
   redrawChart(endpoint);
 }
 
@@ -269,15 +272,29 @@ function connectWebSocket() {
       renderTiles(message.services);
     } else if (message.type === "metric_point") {
       if (message.service === selectedService && endpointCharts.has(message.endpoint)) {
-        endpointCharts.get(message.endpoint).points.set(message.minute_bucket, message);
+        const entry = endpointCharts.get(message.endpoint);
+        // Pub/Sub gives no ordering guarantee across a reconnect — discard anything
+        // not newer than the last applied sequence rather than regressing the chart.
+        if (message.sequence <= entry.lastSequence) return;
+        entry.lastSequence = message.sequence;
+        entry.points.set(message.minute_bucket, message);
         redrawChart(message.endpoint);
       }
     } else if (message.type === "anomaly") {
       if (seenAnomalyIds.has(message.id)) return;
       seenAnomalyIds.add(message.id);
       renderAnomaly(message);
+    } else if (message.type === "lag") {
+      renderLag(message);
     }
   };
+}
+
+function renderLag(message) {
+  const el = document.getElementById("lag");
+  const lagText = message.lag === null || message.lag === undefined ? "" : ` · lag ${message.lag}`;
+  el.textContent = `queue: ${message.pending_count} pending${lagText}`;
+  el.className = message.pending_count > 100 ? "tile-rate error" : message.pending_count > 20 ? "tile-rate warn" : "";
 }
 
 fetchServices();

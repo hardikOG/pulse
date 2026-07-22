@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     # Alerts (Phase 5 onward)
     webhook_url: str | None = None
     webhook_max_retries: int = 3
+    webhook_backoff_base_seconds: float = 1.0
+    webhook_timeout_seconds: float = 5.0
+
+    # Live dashboard updates (Phase 5 onward)
+    live_updates_channel: str = "pulse:live"
 
     # Runtime
     log_level: str = "INFO"

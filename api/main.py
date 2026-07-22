@@ -3,13 +3,26 @@ buffer; all heavy work (aggregation, anomaly detection) happens downstream in th
 consumer (the slow path).
 """
 
+import asyncio
+import json
 import time
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
+from fastapi.responses import FileResponse
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
@@ -34,6 +47,7 @@ from schemas import EventIn
 
 settings = get_settings()
 logger = get_logger("pulse.api", settings.log_level)
+DASHBOARD_PATH = Path(__file__).resolve().parent.parent / "dashboard" / "index.html"
 
 
 @asynccontextmanager
@@ -58,10 +72,74 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.redis = make_redis_client(settings)
     engine = make_engine(settings)
     app.state.session_factory = make_session_factory(engine)
+    # In-process set of connected dashboard WebSocket clients. One Redis Pub/Sub
+    # subscription (started below) fans out to all of them, rather than each browser
+    # tab holding its own Redis subscription — see ARCHITECTURE_LEDGER.md. A separate
+    # client with a short connect timeout: this is a one-shot, best-effort startup
+    # attempt, and a slow/absent Redis shouldn't make every request (or every test
+    # that spins up the app) pay the same multi-second timeout tuned for the fast
+    # path's read/write operations.
+    app.state.websocket_clients = set()
+    pubsub_redis = make_redis_client(settings, socket_connect_timeout_seconds=1.0)
+    fanout_task = asyncio.create_task(_pubsub_fanout(app, pubsub_redis))
     try:
         yield
     finally:
+        fanout_task.cancel()
+        with suppress(Exception):
+            await pubsub_redis.aclose()
         await app.state.redis.aclose()
+
+
+async def _pubsub_fanout(app: FastAPI, pubsub_redis: Redis) -> None:
+    """Subscribe to the live-updates channel and fan out messages to WebSocket clients.
+
+    Purpose: bridges the consumer's Redis Pub/Sub publishes (see
+        consumer/broadcast.py) to every connected dashboard client, via one shared
+        Redis subscription rather than one per browser tab.
+    Inputs: app — used to reach app.state.websocket_clients; pubsub_redis — a client
+        constructed with a short connect timeout (see lifespan()), separate from
+        app.state.redis, since this is a one-shot best-effort attempt that shouldn't
+        pay the fast path's longer timeout.
+    Outputs: never returns under normal operation; runs until cancelled at shutdown,
+        or exits early (logged) if Redis is unreachable — live dashboard updates are a
+        convenience feature, not something that should prevent the API from serving
+        the rest of its routes.
+    Complexity: O(c) per message, c = connected client count.
+    Failure cases: never raises — a send failure to one client (e.g. it disconnected
+        without the server noticing yet) is caught and that client is dropped from the
+        set; a RedisError (e.g. Redis unreachable at startup) is logged and the task
+        exits rather than crashing.
+    """
+    try:
+        pubsub = pubsub_redis.pubsub()
+        await pubsub.subscribe(settings.live_updates_channel)
+    except Exception as exc:  # noqa: BLE001 - an optional feature must not block API startup
+        logger.error(
+            "live updates subscription failed, dashboard will not receive live updates",
+            extra={"extra_fields": {"error": str(exc)}},
+        )
+        return
+    try:
+        while True:
+            # get_message(timeout=...) rather than `async for message in pubsub.listen()`
+            # deliberately: listen()'s blocking internal read loop responds slowly to
+            # task cancellation (observed directly — cancelling it added ~2.7s to every
+            # test that spins up the app). Polling with a bounded per-call timeout gives
+            # a cancellation checkpoint every iteration instead.
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+            if message is None:
+                continue
+            dead_clients = set()
+            for client in app.state.websocket_clients:
+                try:
+                    await client.send_text(message["data"])
+                except Exception:  # noqa: BLE001 - a dead client must not break fanout for the rest
+                    dead_clients.add(client)
+            app.state.websocket_clients -= dead_clients
+    finally:
+        await pubsub.unsubscribe(settings.live_updates_channel)
+        await pubsub.aclose()
 
 
 app = FastAPI(title="Pulse API", lifespan=lifespan)
@@ -180,6 +258,22 @@ async def health() -> dict[str, str]:
     Failure cases: none — this route cannot fail short of the process itself being down.
     """
     return {"status": "ok"}
+
+
+@app.get("/", include_in_schema=False)
+async def dashboard() -> FileResponse:
+    """Serve the single-file dashboard frontend.
+
+    Purpose: the dashboard is a static HTML/JS file (dashboard/index.html) — this
+        route just hands it to the browser; all live behavior happens client-side via
+        REST fetches to the read API and the /ws WebSocket.
+    Inputs: none.
+    Outputs: the dashboard HTML file, text/html.
+    Complexity: O(1).
+    Failure cases: FileResponse raises a 404 if the file is missing (e.g. a Docker
+        image built without dashboard/ copied in).
+    """
+    return FileResponse(DASHBOARD_PATH)
 
 
 @app.post("/events", status_code=status.HTTP_202_ACCEPTED)
@@ -358,3 +452,49 @@ async def get_service_detail(
         error_rate=(total_errors / total_requests) if total_requests else 0.0,
         endpoints=endpoint_series,
     )
+
+
+@app.websocket("/ws")
+async def websocket_live_updates(websocket: WebSocket) -> None:
+    """Live dashboard updates: one bootstrap snapshot, then incremental messages.
+
+    Purpose: the dashboard's live-update transport. See ARCHITECTURE_LEDGER.md for
+        why this is snapshot-once-then-incremental rather than resending full state
+        on every change.
+    Inputs: websocket.
+    Outputs: none — holds the connection open until the client disconnects; pushes a
+        {"type": "snapshot", "services": [...]} message immediately on connect, then
+        whatever metric_point/anomaly messages _pubsub_fanout forwards.
+    Complexity: O(1) to accept; the snapshot costs one list_services query.
+    Failure cases: WebSocketDisconnect is caught and the client is removed from the
+        fan-out set; the session used for the snapshot query is always closed via
+        finally, regardless of how the connection ends.
+    """
+    await websocket.accept()
+    websocket.app.state.websocket_clients.add(websocket)
+    session = websocket.app.state.session_factory()
+    try:
+        rows, _, _, _ = list_services(session, None, None, "all", 100, 0)
+        snapshot = {
+            "type": "snapshot",
+            "services": [
+                {
+                    "service": row.service,
+                    "request_count": row.request_count,
+                    "error_count": row.error_count,
+                    "error_rate": (
+                        (row.error_count / row.request_count) if row.request_count else 0.0
+                    ),
+                    "last_seen": row.last_seen.isoformat() if row.last_seen else None,
+                }
+                for row in rows
+            ],
+        }
+        await websocket.send_text(json.dumps(snapshot))
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        session.close()
+        websocket.app.state.websocket_clients.discard(websocket)

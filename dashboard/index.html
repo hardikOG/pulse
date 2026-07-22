@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pulse</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131826;
+    --panel-border: #232a3d;
+    --text: #e6e9ef;
+    --muted: #8b93a7;
+    --green: #35d399;
+    --yellow: #f0b93a;
+    --red: #f0554a;
+    --accent: #5b8cff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--panel-border);
+  }
+  header h1 { font-size: 18px; margin: 0; letter-spacing: 0.02em; }
+  #status {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--panel-border);
+    color: var(--muted);
+  }
+  #status.live { color: var(--green); border-color: var(--green); }
+  #status.down { color: var(--red); border-color: var(--red); }
+  main {
+    display: grid;
+    grid-template-columns: 320px 1fr;
+    gap: 20px;
+    padding: 20px 24px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  section h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  #tiles { display: flex; flex-direction: column; gap: 10px; }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .tile:hover { border-color: var(--accent); }
+  .tile.selected { border-color: var(--accent); background: #171d30; }
+  .tile-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .tile-name { font-weight: 600; font-size: 14px; }
+  .tile-rate { font-size: 12px; font-weight: 600; }
+  .tile-rate.healthy { color: var(--green); }
+  .tile-rate.warn { color: var(--yellow); }
+  .tile-rate.error { color: var(--red); }
+  .tile-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  #detail { display: flex; flex-direction: column; gap: 16px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .chart-title { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  canvas { max-height: 180px; }
+  #anomalies { display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+  .anomaly {
+    border-left: 3px solid var(--red);
+    background: var(--panel);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-size: 13px;
+    animation: flash 1.2s ease-out;
+  }
+  .anomaly .meta { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  @keyframes flash {
+    from { background: #3a1f24; }
+    to { background: var(--panel); }
+  }
+  .empty { color: var(--muted); font-size: 13px; padding: 12px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pulse</h1>
+  <span id="status">connecting…</span>
+</header>
+<main>
+  <section>
+    <h2>Services</h2>
+    <div id="tiles"><div class="empty">Loading…</div></div>
+  </section>
+  <section id="detail">
+    <div class="card">
+      <h2>Anomalies</h2>
+      <div id="anomalies"><div class="empty">None yet.</div></div>
+    </div>
+    <div class="card">
+      <div class="chart-title" id="chart-title">Select a service to see per-endpoint latency</div>
+      <div id="charts"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const API_BASE = "";
+const seenAnomalyIds = new Set();
+let selectedService = null;
+// per-endpoint chart state: endpoint -> { chart, points: Map(minute_bucket -> {p95, request_count, error_count}) }
+const endpointCharts = new Map();
+
+function errorRateClass(rate) {
+  if (rate >= 0.1) return "error";
+  if (rate >= 0.02) return "warn";
+  return "healthy";
+}
+
+function renderTiles(services) {
+  const container = document.getElementById("tiles");
+  if (!services.length) {
+    container.innerHTML = '<div class="empty">No services yet — send some events.</div>';
+    return;
+  }
+  container.innerHTML = "";
+  for (const svc of services) {
+    const el = document.createElement("div");
+    el.className = "tile" + (svc.service === selectedService ? " selected" : "");
+    const rateClass = errorRateClass(svc.error_rate);
+    el.innerHTML = `
+      <div class="tile-top">
+        <span class="tile-name">${svc.service}</span>
+        <span class="tile-rate ${rateClass}">${(svc.error_rate * 100).toFixed(1)}%</span>
+      </div>
+      <div class="tile-meta">${svc.request_count} req · ${svc.error_count} err</div>
+    `;
+    el.addEventListener("click", () => selectService(svc.service));
+    container.appendChild(el);
+  }
+}
+
+async function fetchServices() {
+  try {
+    const res = await fetch(`${API_BASE}/services?limit=100`);
+    const body = await res.json();
+    renderTiles(body.items);
+  } catch (err) {
+    console.error("failed to fetch services", err);
+  }
+}
+
+async function selectService(service) {
+  selectedService = service;
+  document.getElementById("chart-title").textContent = `${service} — per-endpoint p95 latency`;
+  document.querySelectorAll(".tile").forEach((t) => t.classList.remove("selected"));
+  fetchServices();
+  endpointCharts.forEach((entry) => entry.chart.destroy());
+  endpointCharts.clear();
+  document.getElementById("charts").innerHTML = "";
+
+  try {
+    const res = await fetch(`${API_BASE}/services/${encodeURIComponent(service)}/metrics`);
+    if (!res.ok) return;
+    const body = await res.json();
+    for (const endpoint of body.endpoints) {
+      const points = new Map();
+      for (const point of endpoint.series) {
+        points.set(point.minute_bucket, point);
+      }
+      createEndpointChart(endpoint.endpoint, points);
+    }
+  } catch (err) {
+    console.error("failed to fetch service detail", err);
+  }
+}
+
+function createEndpointChart(endpoint, points) {
+  const wrap = document.createElement("div");
+  wrap.style.marginBottom = "16px";
+  const label = document.createElement("div");
+  label.style.fontSize = "12px";
+  label.style.color = "var(--muted)";
+  label.style.marginBottom = "4px";
+  label.textContent = endpoint;
+  const canvas = document.createElement("canvas");
+  wrap.appendChild(label);
+  wrap.appendChild(canvas);
+  document.getElementById("charts").appendChild(wrap);
+
+  const chart = new Chart(canvas, {
+    type: "line",
+    data: { datasets: [{ label: "p95 (ms)", data: [], borderColor: "#5b8cff", tension: 0.25, pointRadius: 2 }] },
+    options: {
+      animation: false,
+      scales: {
+        x: { type: "time", time: { unit: "minute" }, ticks: { color: "#8b93a7" } },
+        y: { ticks: { color: "#8b93a7" } },
+      },
+      plugins: { legend: { labels: { color: "#8b93a7" } } },
+    },
+  });
+  endpointCharts.set(endpoint, { chart, points });
+  redrawChart(endpoint);
+}
+
+function redrawChart(endpoint) {
+  const entry = endpointCharts.get(endpoint);
+  if (!entry) return;
+  const sorted = [...entry.points.entries()].sort(([a], [b]) => new Date(a) - new Date(b));
+  entry.chart.data.datasets[0].data = sorted.map(([bucket, p]) => ({ x: bucket, y: p.p95 }));
+  entry.chart.update("none");
+}
+
+function renderAnomaly(anomaly) {
+  const container = document.getElementById("anomalies");
+  const empty = container.querySelector(".empty");
+  if (empty) empty.remove();
+  const el = document.createElement("div");
+  el.className = "anomaly";
+  el.innerHTML = `
+    <div><strong>${anomaly.service}</strong> / ${anomaly.endpoint} — ${anomaly.detector}</div>
+    <div>${anomaly.reason}</div>
+    <div class="meta">${anomaly.minute_bucket}</div>
+  `;
+  container.prepend(el);
+  while (container.children.length > 50) {
+    container.removeChild(container.lastChild);
+  }
+}
+
+function connectWebSocket() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  const statusEl = document.getElementById("status");
+
+  ws.onopen = () => {
+    statusEl.textContent = "live";
+    statusEl.className = "live";
+  };
+  ws.onclose = () => {
+    statusEl.textContent = "reconnecting…";
+    statusEl.className = "down";
+    setTimeout(connectWebSocket, 2000);
+  };
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (event) => {
+    const message = JSON.parse(event.data);
+    if (message.type === "snapshot") {
+      renderTiles(message.services);
+    } else if (message.type === "metric_point") {
+      if (message.service === selectedService && endpointCharts.has(message.endpoint)) {
+        endpointCharts.get(message.endpoint).points.set(message.minute_bucket, message);
+        redrawChart(message.endpoint);
+      }
+    } else if (message.type === "anomaly") {
+      if (seenAnomalyIds.has(message.id)) return;
+      seenAnomalyIds.add(message.id);
+      renderAnomaly(message);
+    }
+  };
+}
+
+fetchServices();
+setInterval(fetchServices, 15000);
+connectWebSocket();
+</script>
+</body>
+</html>

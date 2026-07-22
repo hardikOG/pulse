@@ -5,7 +5,11 @@ from redis.asyncio import Redis
 from core.config import Settings
 
 
-def make_redis_client(settings: Settings, socket_timeout_seconds: float | None = None) -> Redis:
+def make_redis_client(
+    settings: Settings,
+    socket_timeout_seconds: float | None = None,
+    socket_connect_timeout_seconds: float | None = None,
+) -> Redis:
     """Build an async Redis client for the given settings.
 
     Purpose: construct a Redis client without a module-level global, so the api and
@@ -16,7 +20,14 @@ def make_redis_client(settings: Settings, socket_timeout_seconds: float | None =
         The consumer needs a larger override here: XREADGROUP's BLOCK argument can hold
         the socket open for up to settings.stream_block_timeout_ms waiting for new
         entries, and if the socket timeout were shorter than that BLOCK duration, every
-        idle poll would raise a spurious redis.exceptions.TimeoutError.
+        idle poll would raise a spurious redis.exceptions.TimeoutError. socket_connect_
+        timeout_seconds — optional override for the initial connection attempt,
+        independent of the read/write timeout; defaults to
+        settings.redis_socket_timeout_seconds too. Callers that make a one-shot,
+        best-effort connection attempt (e.g. the API's live-updates Pub/Sub
+        subscription) should pass a short value here — this is enforced by redis-py's
+        own connection code (wrapping an external asyncio.wait_for around an
+        already-open client does not reliably interrupt a slow OS-level connect).
     Outputs: a configured redis.asyncio.Redis client with decode_responses=True (so
         callers get str, not bytes) and bounded connect/socket timeouts — a dead or
         unreachable Redis fails fast instead of hanging the fast path indefinitely.
@@ -28,9 +39,14 @@ def make_redis_client(settings: Settings, socket_timeout_seconds: float | None =
         if socket_timeout_seconds is not None
         else settings.redis_socket_timeout_seconds
     )
+    connect_timeout = (
+        socket_connect_timeout_seconds
+        if socket_connect_timeout_seconds is not None
+        else settings.redis_socket_timeout_seconds
+    )
     return Redis.from_url(
         settings.redis_url,
         decode_responses=True,
-        socket_connect_timeout=settings.redis_socket_timeout_seconds,
+        socket_connect_timeout=connect_timeout,
         socket_timeout=timeout,
     )

@@ -32,6 +32,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
@@ -40,6 +41,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from consumer.aggregator import Rollup, bucket_for, compute_rollup, is_error
+from consumer.broadcast import build_metric_point_message, publish
 from consumer.detection import run_detection_for_bucket
 from core.config import Settings, get_settings
 from core.logging import get_logger
@@ -271,21 +273,25 @@ async def _flush_and_ack(
     buckets: dict[BucketKey, _BucketAccumulator],
     message_ids: list[str],
     touched: set[BucketKey],
+    httpx_client: httpx.AsyncClient,
+    background_tasks: set[asyncio.Task],
 ) -> None:
-    """Upsert every touched bucket's rollup, run anomaly detection, then ack iff upserts succeeded.
+    """Upsert every touched bucket's rollup, publish live updates, run detection, ack.
 
     Purpose: the durability boundary — a message is only acked once every bucket it
         contributed to has been durably persisted, giving at-least-once semantics.
-        Anomaly detection (Phase 4) runs after a successful upsert, once per touched
-        bucket, but is best-effort: a detection failure is logged and does not affect
-        whether the batch gets acked, since that guarantee covers raw metrics data,
-        not derived analysis (see consumer/detection.py).
+        Live-update publish and anomaly detection (Phase 4/5) both run after a
+        successful upsert, once per touched bucket, but are best-effort: neither
+        affects whether the batch gets acked, since that guarantee covers raw metrics
+        data, not derived/downstream notification (see consumer/broadcast.py,
+        consumer/detection.py).
     Inputs: redis_client; session_factory; settings; logger; buckets — accumulator
         dict (read, not mutated here); message_ids — this batch's stream entry IDs;
-        touched — bucket keys this batch added data to.
+        touched — bucket keys this batch added data to; httpx_client — shared client
+        for webhook delivery; background_tasks — in-flight webhook task tracking set.
     Outputs: None.
     Complexity: one Postgres transaction covering all of len(touched) buckets, plus
-        one detection pass per bucket, plus one XACK call.
+        one live-update publish and one detection pass per bucket, plus one XACK call.
     Failure cases: if the batch's transaction fails after retries, none of this
         batch's messages are acked — they remain pending and are redelivered on the
         next startup's pending-drain (or, if the consumer keeps running, on a future
@@ -300,7 +306,28 @@ async def _flush_and_ack(
 
     if all_ok:
         for bucket_key, rollup in bucket_rollups.items():
-            run_detection_for_bucket(session_factory, bucket_key, rollup, settings, logger)
+            minute_bucket, service, endpoint = bucket_key
+            live_message = build_metric_point_message(
+                service,
+                endpoint,
+                minute_bucket,
+                rollup.request_count,
+                rollup.error_count,
+                rollup.p50,
+                rollup.p95,
+                rollup.p99,
+            )
+            await publish(redis_client, settings.live_updates_channel, live_message, logger)
+            await run_detection_for_bucket(
+                session_factory,
+                bucket_key,
+                rollup,
+                settings,
+                logger,
+                redis_client,
+                httpx_client,
+                background_tasks,
+            )
 
     if not message_ids:
         return
@@ -323,6 +350,8 @@ async def _drain_pending(
     settings: Settings,
     logger,
     buckets: dict[BucketKey, _BucketAccumulator],
+    httpx_client: httpx.AsyncClient,
+    background_tasks: set[asyncio.Task],
 ) -> None:
     """Replay this consumer's own previously-delivered-but-unacked entries.
 
@@ -363,7 +392,15 @@ async def _drain_pending(
 
         message_ids, touched = _process_entries(entries, buckets, settings, logger)
         await _flush_and_ack(
-            redis_client, session_factory, settings, logger, buckets, message_ids, touched
+            redis_client,
+            session_factory,
+            settings,
+            logger,
+            buckets,
+            message_ids,
+            touched,
+            httpx_client,
+            background_tasks,
         )
         drained += len(entries)
 
@@ -389,50 +426,66 @@ async def _run_async(settings: Settings, logger) -> None:
     engine = make_engine(settings)
     Base.metadata.create_all(engine)
     session_factory = make_session_factory(engine)
+    # Shared across all webhook deliveries (connection reuse); background_tasks holds
+    # references to in-flight fire-and-forget webhook tasks so they aren't garbage
+    # collected mid-flight (a known asyncio pitfall) — each task discards itself on
+    # completion via add_done_callback.
+    background_tasks: set[asyncio.Task] = set()
 
-    await _ensure_consumer_group(redis_client, settings, logger)
+    async with httpx.AsyncClient() as httpx_client:
+        await _ensure_consumer_group(redis_client, settings, logger)
 
-    buckets: dict[BucketKey, _BucketAccumulator] = {}
-    await _drain_pending(redis_client, session_factory, settings, logger, buckets)
+        buckets: dict[BucketKey, _BucketAccumulator] = {}
+        await _drain_pending(
+            redis_client, session_factory, settings, logger, buckets, httpx_client, background_tasks
+        )
 
-    logger.info("consumer entering steady state", extra={"extra_fields": {}})
+        logger.info("consumer entering steady state", extra={"extra_fields": {}})
 
-    while True:
-        try:
-            response = await redis_client.xreadgroup(
-                groupname=settings.consumer_group,
-                consumername=settings.consumer_name,
-                streams={settings.event_stream: ">"},
-                count=settings.stream_batch_size,
-                block=settings.stream_block_timeout_ms,
+        while True:
+            try:
+                response = await redis_client.xreadgroup(
+                    groupname=settings.consumer_group,
+                    consumername=settings.consumer_name,
+                    streams={settings.event_stream: ">"},
+                    count=settings.stream_batch_size,
+                    block=settings.stream_block_timeout_ms,
+                )
+            except RedisError as exc:
+                logger.error("redis read failed", extra={"extra_fields": {"error": str(exc)}})
+                await asyncio.sleep(settings.redis_socket_timeout_seconds)
+                continue
+
+            if not response:
+                _evict_stale_buckets(buckets, settings, logger)
+                continue
+
+            batch_start = time.perf_counter()
+            entries = response[0][1]
+            message_ids, touched = _process_entries(entries, buckets, settings, logger)
+            await _flush_and_ack(
+                redis_client,
+                session_factory,
+                settings,
+                logger,
+                buckets,
+                message_ids,
+                touched,
+                httpx_client,
+                background_tasks,
             )
-        except RedisError as exc:
-            logger.error("redis read failed", extra={"extra_fields": {"error": str(exc)}})
-            await asyncio.sleep(settings.redis_socket_timeout_seconds)
-            continue
-
-        if not response:
+            elapsed_ms = (time.perf_counter() - batch_start) * 1000
+            logger.info(
+                "batch processed",
+                extra={
+                    "extra_fields": {
+                        "size": len(message_ids),
+                        "buckets_touched": len(touched),
+                        "elapsed_ms": round(elapsed_ms, 2),
+                    }
+                },
+            )
             _evict_stale_buckets(buckets, settings, logger)
-            continue
-
-        batch_start = time.perf_counter()
-        entries = response[0][1]
-        message_ids, touched = _process_entries(entries, buckets, settings, logger)
-        await _flush_and_ack(
-            redis_client, session_factory, settings, logger, buckets, message_ids, touched
-        )
-        elapsed_ms = (time.perf_counter() - batch_start) * 1000
-        logger.info(
-            "batch processed",
-            extra={
-                "extra_fields": {
-                    "size": len(message_ids),
-                    "buckets_touched": len(touched),
-                    "elapsed_ms": round(elapsed_ms, 2),
-                }
-            },
-        )
-        _evict_stale_buckets(buckets, settings, logger)
 
 
 def run() -> None:

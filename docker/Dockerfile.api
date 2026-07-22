@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api ./api
 COPY core ./core
 COPY db ./db
+COPY dashboard ./dashboard
 COPY schemas.py .
 
 EXPOSE 8000

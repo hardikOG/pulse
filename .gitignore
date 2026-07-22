@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Environment / secrets
+.env
+
+# Private project docs (never ships publicly)
+docs/private/
+CLAUDE.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Claude Code tool settings
+.claude/

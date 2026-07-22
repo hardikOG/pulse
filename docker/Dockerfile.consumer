@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY consumer ./consumer
+COPY detector ./detector
+COPY core ./core
+COPY db ./db
+COPY schemas.py .
+
+CMD ["python", "-m", "consumer.main"]

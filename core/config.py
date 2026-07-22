@@ -33,6 +33,9 @@ class Settings(BaseSettings):
 
     # Aggregation (Phase 2 onward)
     aggregation_window_seconds: int = 60
+    bucket_eviction_grace_seconds: int = 120
+    postgres_max_retries: int = 3
+    postgres_retry_backoff_seconds: float = 1.0
 
     # Anomaly detection (Phase 4 onward)
     zscore_threshold: float = 3.0

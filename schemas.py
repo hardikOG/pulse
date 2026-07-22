@@ -37,18 +37,22 @@ class EventIn(BaseModel):
     @field_validator("ts")
     @classmethod
     def ts_not_too_far_in_future(cls, value: datetime) -> datetime:
-        """Reject timestamps further in the future than plausible clock skew allows.
+        """Reject implausible timestamps and normalize to UTC-aware.
 
         Purpose: guards per-minute bucketing downstream from garbage/malicious
-            timestamps that would otherwise create buckets for "future" minutes.
-        Inputs: value — the parsed ts datetime.
-        Outputs: value, unchanged, if valid.
+            timestamps that would otherwise create buckets for "future" minutes, and
+            removes ambiguity for the consumer's bucketing logic (Phase 2) by always
+            returning a tz-aware UTC value — a naive datetime's `.timestamp()` would
+            otherwise be interpreted in the *system's local* timezone, which is
+            fragile and environment-dependent.
+        Inputs: value — the parsed ts datetime, aware or naive.
+        Outputs: value normalized to UTC-aware, if valid.
         Complexity: O(1).
         Failure cases: raises ValueError (surfaced as 422) if value is more than
             _MAX_FUTURE_SKEW ahead of now.
         """
+        normalized = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
         now = datetime.now(timezone.utc)
-        compare_value = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-        if compare_value - now > _MAX_FUTURE_SKEW:
+        if normalized - now > _MAX_FUTURE_SKEW:
             raise ValueError("ts is too far in the future")
-        return value
+        return normalized

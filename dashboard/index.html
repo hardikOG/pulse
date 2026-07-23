@@ -127,6 +127,12 @@
 
 <script>
 const API_BASE = "";
+// Bump only if consumer/broadcast.py's LIVE_UPDATES_SCHEMA_VERSION changes in a
+// breaking way. A mismatch doesn't stop the dashboard (forward-compatible by
+// design) but is worth surfacing loudly rather than silently misinterpreting a
+// differently-shaped message.
+const EXPECTED_SCHEMA_VERSION = 1;
+let warnedAboutSchemaVersion = false;
 const seenAnomalyIds = new Set();
 let selectedService = null;
 // per-endpoint chart state: endpoint -> { chart, points: Map(minute_bucket -> {p95, request_count, error_count}) }
@@ -268,6 +274,14 @@ function connectWebSocket() {
 
   ws.onmessage = (event) => {
     const message = JSON.parse(event.data);
+    if (message.schema_version !== EXPECTED_SCHEMA_VERSION && !warnedAboutSchemaVersion) {
+      warnedAboutSchemaVersion = true;
+      console.warn(
+        `Pulse live-update schema_version mismatch: dashboard expects ${EXPECTED_SCHEMA_VERSION}, ` +
+        `server sent ${message.schema_version}. Messages will still be processed, but the ` +
+        `protocol may have changed — check for a dashboard update.`
+      );
+    }
     if (message.type === "snapshot") {
       renderTiles(message.services);
     } else if (message.type === "metric_point") {

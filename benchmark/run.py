@@ -23,7 +23,6 @@ from sqlalchemy.orm import sessionmaker
 from benchmark.metrics import compute_precision_recall, compute_throughput_variance
 from benchmark.report import (
     BenchmarkReportData,
-    LatencyStats,
     OperationalStats,
     PipelineThroughput,
     SystemInfo,
@@ -128,7 +127,8 @@ def _query_postgres_size_mb(session_factory: sessionmaker) -> float:
     """
     session = session_factory()
     try:
-        size_bytes = session.execute(text("SELECT pg_database_size(current_database())")).scalar_one()
+        query = text("SELECT pg_database_size(current_database())")
+        size_bytes = session.execute(query).scalar_one()
         return size_bytes / (1024 * 1024)
     except Exception:  # noqa: BLE001 - best-effort observability read
         return 0.0
@@ -230,13 +230,21 @@ async def _run(
         print(f"      {warmed} warmup events accepted")
         _mark("warmup finished")
 
-        print(f"[2/4] throughput burst: {throughput_seconds:.0f}s at concurrency={throughput_concurrency}...")
+        print(
+            f"[2/4] throughput burst: {throughput_seconds:.0f}s "
+            f"at concurrency={throughput_concurrency}..."
+        )
         burst_start = datetime.now(timezone.utc)
-        throughput = await run_throughput_burst(client, events_url, throughput_seconds, throughput_concurrency)
+        throughput = await run_throughput_burst(
+            client, events_url, throughput_seconds, throughput_concurrency
+        )
         print(f"      {throughput.events_sent} sent, {throughput.events_failed} failed")
         _mark("throughput burst finished")
 
-        print(f"[3/4] labeled live phase: scenario={scenario.name}, {scenario.live_duration_seconds:.0f}s...")
+        print(
+            f"[3/4] labeled live phase: scenario={scenario.name}, "
+            f"{scenario.live_duration_seconds:.0f}s..."
+        )
         _mark("live phase started")
         live_start = datetime.now(timezone.utc)
         stop_lag_sampling = asyncio.Event()
@@ -244,11 +252,17 @@ async def _run(
         live = await run_live_phase(client, events_url, scenario)
         stop_lag_sampling.set()
         peak_pending, peak_lag = await lag_task
-        print(f"      {live.events_sent} sent, {live.events_failed} failed, {len(live.labels)} anomalies injected")
+        print(
+            f"      {live.events_sent} sent, {live.events_failed} failed, "
+            f"{len(live.labels)} anomalies injected"
+        )
         _mark("live phase finished")
 
     grace_seconds = 15
-    print(f"[4/4] waiting {grace_seconds}s for the consumer to finish processing, then querying results...")
+    print(
+        f"[4/4] waiting {grace_seconds}s for the consumer to finish processing, "
+        "then querying results..."
+    )
     await asyncio.sleep(grace_seconds)
     _mark("grace period elapsed")
 
@@ -285,10 +299,14 @@ async def _run(
         ),
         pipeline=PipelineThroughput(
             api_ingest_events_per_sec=(
-                throughput.events_sent / throughput.duration_seconds if throughput.duration_seconds else 0.0
+                throughput.events_sent / throughput.duration_seconds
+                if throughput.duration_seconds
+                else 0.0
             ),
             consumer_processed_events_per_sec=(
-                consumer_processed / throughput.duration_seconds if throughput.duration_seconds else 0.0
+                consumer_processed / throughput.duration_seconds
+                if throughput.duration_seconds
+                else 0.0
             ),
         ),
         timeline=timeline,
@@ -316,7 +334,8 @@ async def _run(
     print(f"\nReports written to {output_path} and {json_path}")
     print(
         f"precision={detection.precision:.1%} recall={detection.recall:.1%} "
-        f"(TP={detection.true_positives} FP={detection.false_positives} FN={detection.false_negatives})"
+        f"(TP={detection.true_positives} FP={detection.false_positives} "
+        f"FN={detection.false_negatives})"
     )
     print(
         f"API ingest: {report_data.pipeline.api_ingest_events_per_sec:.1f}/s, "

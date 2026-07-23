@@ -14,13 +14,29 @@ import httpx
 
 from simulator.scenarios import Scenario, rate_at
 
-
 # Dedicated, isolated (service, endpoint) for the throughput burst — never used by
 # warmup or the labeled live phase — so benchmark/run.py can query Postgres for
 # exactly the burst's consumer-processed count without it being mixed in with any
 # other traffic landing in the same bucket.
 BURST_SERVICE = "benchmark"
 BURST_ENDPOINT = "/throughput"
+
+# "Normal" traffic's status/latency distribution — deliberately wide (a realistic mix
+# of success, redirect-ish 201s, and the occasional not-found) so injected anomalies
+# have to be genuinely extreme to stand out, rather than the simulator handing the
+# detector an easy, unrealistically narrow baseline.
+_NORMAL_STATUS_WEIGHTS = (200, 200, 200, 201, 404)
+_NORMAL_LATENCY_RANGE_MS = (15, 120)
+_LATENCY_SPIKE_RANGE_MS = (3000, 6000)
+_ERROR_BURST_STATUSES = (500, 502, 503)
+# Concurrency cap for the warmup backfill's concurrent sends — independent of
+# benchmark/run.py's --throughput-concurrency (which tunes the separate, unpaced
+# throughput-burst phase); coincidentally the same default value, not linked.
+_WARMUP_CONCURRENCY = 50
+# Floor under rate_at()'s output so 1.0 / target_rate never approaches an unbounded
+# sleep if a scenario's rate curve ever produced (or was misconfigured to produce) a
+# near-zero or negative rate.
+_MIN_TARGET_RATE_PER_SECOND = 0.1
 
 
 @dataclass(frozen=True)
@@ -61,33 +77,40 @@ def _bucket_for(ts: datetime) -> datetime:
     return ts.replace(second=0, microsecond=0)
 
 
-def _normal_event(service: str, endpoint: str, ts: datetime) -> dict:
+def _event_payload(
+    service: str, endpoint: str, status_code: int, latency_ms: float, ts: datetime
+) -> dict:
+    """Build the wire-format dict every generated event shares, regardless of scenario."""
     return {
         "service": service,
         "endpoint": endpoint,
-        "status_code": random.choice([200, 200, 200, 201, 404]),
-        "latency_ms": round(random.uniform(15, 120), 2),
+        "status_code": status_code,
+        "latency_ms": round(latency_ms, 2),
         "ts": ts.isoformat(),
     }
 
 
+def _normal_event(service: str, endpoint: str, ts: datetime) -> dict:
+    return _event_payload(
+        service,
+        endpoint,
+        random.choice(_NORMAL_STATUS_WEIGHTS),
+        random.uniform(*_NORMAL_LATENCY_RANGE_MS),
+        ts,
+    )
+
+
 def _anomalous_event(service: str, endpoint: str, ts: datetime, kind: str) -> dict:
     if kind == "latency_spike":
-        return {
-            "service": service,
-            "endpoint": endpoint,
-            "status_code": 200,
-            "latency_ms": round(random.uniform(3000, 6000), 2),
-            "ts": ts.isoformat(),
-        }
+        return _event_payload(service, endpoint, 200, random.uniform(*_LATENCY_SPIKE_RANGE_MS), ts)
     if kind == "error_burst":
-        return {
-            "service": service,
-            "endpoint": endpoint,
-            "status_code": random.choice([500, 502, 503]),
-            "latency_ms": round(random.uniform(15, 120), 2),
-            "ts": ts.isoformat(),
-        }
+        return _event_payload(
+            service,
+            endpoint,
+            random.choice(_ERROR_BURST_STATUSES),
+            random.uniform(*_NORMAL_LATENCY_RANGE_MS),
+            ts,
+        )
     raise ValueError(f"unknown anomaly kind: {kind}")
 
 
@@ -129,7 +152,7 @@ async def run_warmup(client: httpx.AsyncClient, url: str, scenario: Scenario) ->
     """
     now = datetime.now(timezone.utc)
     events_per_bucket = 12
-    semaphore = asyncio.Semaphore(50)
+    semaphore = asyncio.Semaphore(_WARMUP_CONCURRENCY)
 
     async def _send(payload: dict) -> float | None:
         async with semaphore:
@@ -173,7 +196,7 @@ async def run_live_phase(client: httpx.AsyncClient, url: str, scenario: Scenario
         if elapsed >= scenario.live_duration_seconds:
             break
 
-        target_rate = max(rate_at(scenario, elapsed), 0.1)
+        target_rate = max(rate_at(scenario, elapsed), _MIN_TARGET_RATE_PER_SECOND)
         now = datetime.now(timezone.utc)
         injection = next(
             (

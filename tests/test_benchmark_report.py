@@ -43,7 +43,9 @@ def _sample_report_data() -> BenchmarkReportData:
         true_positives=2, false_positives=1, false_negatives=0, precision=0.667, recall=1.0
     )
     latency = compute_latency_stats([1.0, 2.0, 3.0])
-    variance = ThroughputVariance(per_second_counts=(10, 10, 10), mean=10.0, stddev=0.0, minimum=10, maximum=10)
+    variance = ThroughputVariance(
+        per_second_counts=(10, 10, 10), mean=10.0, stddev=0.0, minimum=10, maximum=10
+    )
     operational = OperationalStats(
         redis_used_memory_mb=12.5,
         redis_ops_per_sec=340.0,

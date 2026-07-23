@@ -13,6 +13,8 @@ from typing import Any
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from core.protocol import LIVE_UPDATES_SCHEMA_VERSION
+
 
 def build_metric_point_message(
     service: str,
@@ -110,16 +112,19 @@ async def publish(redis_client: Redis, channel: str, message: dict[str, Any], lo
 
     Purpose: the single call site consumer/main.py and consumer/detection.py use to
         notify the dashboard — never allowed to affect the caller's own durability
-        guarantees (metrics upsert, batch acking) if it fails.
+        guarantees (metrics upsert, batch acking) if it fails. Stamps every outgoing
+        message with schema_version here, in one place, so every builder function
+        (present and future) gets it automatically rather than each having to
+        remember to include it.
     Inputs: redis_client; channel — settings.live_updates_channel; message — from
-        build_metric_point_message or build_anomaly_message; logger.
+        build_metric_point_message, build_anomaly_message, or build_lag_message;
+        logger.
     Outputs: None.
     Complexity: O(1) — PUBLISH does not block on subscriber delivery.
     Failure cases: never raises — RedisError is logged and swallowed.
     """
     try:
-        await redis_client.publish(channel, json.dumps(message))
+        envelope = {"schema_version": LIVE_UPDATES_SCHEMA_VERSION, **message}
+        await redis_client.publish(channel, json.dumps(envelope))
     except RedisError as exc:
-        logger.error(
-            "live update publish failed", extra={"extra_fields": {"error": str(exc)}}
-        )
+        logger.error("live update publish failed", extra={"extra_fields": {"error": str(exc)}})

@@ -155,8 +155,7 @@ def _upsert_rollups_batch(
         retried with linear backoff; returns False so the caller does not ack.
     """
     statements = [
-        _build_upsert_statement(bucket_key, rollup)
-        for bucket_key, rollup in bucket_rollups.items()
+        _build_upsert_statement(bucket_key, rollup) for bucket_key, rollup in bucket_rollups.items()
     ]
     for attempt in range(1, settings.postgres_max_retries + 1):
         try:
@@ -199,9 +198,7 @@ def _evict_stale_buckets(
     for key in stale_keys:
         del buckets[key]
     if stale_keys:
-        logger.info(
-            "evicted stale buckets", extra={"extra_fields": {"count": len(stale_keys)}}
-        )
+        logger.info("evicted stale buckets", extra={"extra_fields": {"count": len(stale_keys)}})
 
 
 async def _ensure_consumer_group(redis_client: Redis, settings: Settings, logger) -> None:

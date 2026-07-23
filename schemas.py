@@ -23,7 +23,20 @@ class EventIn(BaseModel):
         a blank service/endpoint, or a ts more than _MAX_FUTURE_SKEW in the future.
     """
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(
+        strict=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "service": "checkout",
+                    "endpoint": "/api/pay",
+                    "status_code": 200,
+                    "latency_ms": 42.5,
+                    "ts": "2026-01-01T12:00:00Z",
+                }
+            ]
+        },
+    )
 
     service: str = Field(min_length=1)
     endpoint: str = Field(min_length=1)

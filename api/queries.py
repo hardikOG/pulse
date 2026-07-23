@@ -5,6 +5,7 @@ constructs), so these run correctly against SQLite in tests as well as Postgres 
 production.
 """
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -18,9 +19,7 @@ StatusClass = Literal["all", "healthy", "error"]
 _DEFAULT_WINDOW = timedelta(minutes=60)
 
 
-def resolve_time_bounds(
-    start: datetime | None, end: datetime | None
-) -> tuple[datetime, datetime]:
+def resolve_time_bounds(start: datetime | None, end: datetime | None) -> tuple[datetime, datetime]:
     """Fill in a default recent time window when start/end are not both provided.
 
     Purpose: single place defining "recent" for every read-API route, so filters
@@ -54,6 +53,29 @@ def _apply_status_class(stmt: Select[Any], status_class: StatusClass) -> Select[
     return stmt
 
 
+def _paginate(
+    session: Session, base: Select[Any], order_by: tuple[Any, ...], limit: int, offset: int
+) -> tuple[Sequence[Any], int]:
+    """Run a grouped/filtered aggregate query's total-count and one-page-of-rows queries.
+
+    Purpose: shared by list_services and list_endpoints, whose only real difference is
+        the columns they select/group/order by — this is the pagination mechanics both
+        need identically (count against the same filtered base, independent of
+        limit/offset; then one ordered, limited page).
+    Inputs: session; base — an already-built, already-filtered Select (GROUP BY and any
+        HAVING already applied); order_by — columns to order the page by, in order;
+        limit/offset — pagination.
+    Outputs: (rows for this page, total matching groups regardless of limit/offset).
+    Complexity: two queries — COUNT over the base's subquery, and one ordered/limited
+        SELECT.
+    Failure cases: none — an out-of-range offset just yields an empty rows list.
+    """
+    total = session.execute(select(func.count()).select_from(base.subquery())).scalar_one()
+    page_stmt = base.order_by(*order_by).limit(limit).offset(offset)
+    rows = session.execute(page_stmt).all()
+    return rows, total
+
+
 def list_services(
     session: Session,
     start: datetime | None,
@@ -61,7 +83,7 @@ def list_services(
     status_class: StatusClass,
     limit: int,
     offset: int,
-) -> tuple[list[Any], int, datetime, datetime]:
+) -> tuple[Sequence[Any], int, datetime, datetime]:
     """Aggregate metrics by service over a time range, paginated and filtered.
 
     Purpose: backs GET /services.
@@ -88,10 +110,7 @@ def list_services(
     )
     base = _apply_status_class(base, status_class)
 
-    total = session.execute(select(func.count()).select_from(base.subquery())).scalar_one()
-
-    page_stmt = base.order_by(Metric.service).limit(limit).offset(offset)
-    rows = session.execute(page_stmt).all()
+    rows, total = _paginate(session, base, (Metric.service,), limit, offset)
     return rows, total, resolved_start, resolved_end
 
 
@@ -103,7 +122,7 @@ def list_endpoints(
     status_class: StatusClass,
     limit: int,
     offset: int,
-) -> tuple[list[Any], int, datetime, datetime]:
+) -> tuple[Sequence[Any], int, datetime, datetime]:
     """Aggregate metrics by (service, endpoint) over a time range, paginated/filtered.
 
     Purpose: backs GET /endpoints.
@@ -131,10 +150,7 @@ def list_endpoints(
         base = base.where(Metric.service == service)
     base = _apply_status_class(base, status_class)
 
-    total = session.execute(select(func.count()).select_from(base.subquery())).scalar_one()
-
-    page_stmt = base.order_by(Metric.service, Metric.endpoint).limit(limit).offset(offset)
-    rows = session.execute(page_stmt).all()
+    rows, total = _paginate(session, base, (Metric.service, Metric.endpoint), limit, offset)
     return rows, total, resolved_start, resolved_end
 
 

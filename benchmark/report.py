@@ -137,7 +137,25 @@ def render_markdown(data: BenchmarkReportData) -> str:
     timeline_lines = "\n".join(
         f"- {entry.offset_seconds:>6.1f}s — {entry.label}" for entry in data.timeline
     )
-    lag_str = "n/a (Redis < 7 or group not yet created)" if data.operational.peak_lag is None else str(data.operational.peak_lag)
+    lag_str = (
+        "n/a (Redis < 7 or group not yet created)"
+        if data.operational.peak_lag is None
+        else str(data.operational.peak_lag)
+    )
+    tv = data.throughput_variance
+    throughput_variance_str = (
+        f"mean: {tv.mean:.1f}, stddev: {tv.stddev:.1f}, min: {tv.minimum}, max: {tv.maximum}"
+    )
+    tl = data.throughput_latency
+    throughput_latency_str = (
+        f"avg: {tl.avg_ms:.2f}ms, p50: {tl.p50_ms:.2f}ms, "
+        f"**p95: {tl.p95_ms:.2f}ms**, p99: {tl.p99_ms:.2f}ms (n={tl.count})"
+    )
+    live_latency_str = (
+        f"avg: {data.live_latency.avg_ms:.2f}ms, p50: {data.live_latency.p50_ms:.2f}ms, "
+        f"p95: {data.live_latency.p95_ms:.2f}ms, p99: {data.live_latency.p99_ms:.2f}ms "
+        f"(n={data.live_latency.count})"
+    )
 
     return f"""# Pulse Benchmark Report
 
@@ -170,15 +188,15 @@ targets are never hardcoded or asserted ahead of measurement.
 - Duration: {data.throughput_duration_seconds:.1f}s
 - Events sent: {data.throughput_events_sent} ({data.throughput_events_failed} failed)
 - **Events/sec (average): {api_rate:.1f}**
-- Per-second throughput — mean: {data.throughput_variance.mean:.1f}, stddev: {data.throughput_variance.stddev:.1f}, min: {data.throughput_variance.minimum}, max: {data.throughput_variance.maximum}
-- Ingest latency — avg: {data.throughput_latency.avg_ms:.2f}ms, p50: {data.throughput_latency.p50_ms:.2f}ms, **p95: {data.throughput_latency.p95_ms:.2f}ms**, p99: {data.throughput_latency.p99_ms:.2f}ms (n={data.throughput_latency.count})
+- Per-second throughput — {throughput_variance_str}
+- Ingest latency — {throughput_latency_str}
 
 ## Labeled scenario run ({data.scenario_name})
 
 - Warmup events (backdated history): {data.warmup_events_sent}
 - Duration: {data.live_duration_seconds:.1f}s
 - Events sent: {data.live_events_sent} ({data.live_events_failed} failed)
-- Ingest latency — avg: {data.live_latency.avg_ms:.2f}ms, p50: {data.live_latency.p50_ms:.2f}ms, p95: {data.live_latency.p95_ms:.2f}ms, p99: {data.live_latency.p99_ms:.2f}ms (n={data.live_latency.count})
+- Ingest latency — {live_latency_str}
 
 ## Detector precision/recall (against labeled ground truth)
 

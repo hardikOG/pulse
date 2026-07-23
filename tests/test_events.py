@@ -100,3 +100,50 @@ def test_redis_unavailable_returns_503() -> None:
         assert response.status_code == 503
     finally:
         app.dependency_overrides.clear()
+
+
+def test_health_consumer_reports_lag_and_consumers(
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    app.dependency_overrides[get_redis] = lambda: fake_redis
+    try:
+        with TestClient(app) as client:
+            asyncio.run(fake_redis.xadd("pulse:events", {"service": "checkout"}))
+            asyncio.run(fake_redis.xgroup_create("pulse:events", "pulse-consumers", id="0"))
+            asyncio.run(
+                fake_redis.xreadgroup(
+                    "pulse-consumers", "consumer-1", {"pulse:events": ">"}, count=10
+                )
+            )
+
+            response = client.get("/health/consumer")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["stream_length"] == 1
+        assert body["pending_count"] == 1
+        assert body["consumers"] == [
+            {"name": "consumer-1", "pending": 1, "idle_ms": body["consumers"][0]["idle_ms"]}
+        ]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_health_consumer_empty_before_consumer_group_exists(
+    fake_redis: fakeredis.aioredis.FakeRedis,
+) -> None:
+    app.dependency_overrides[get_redis] = lambda: fake_redis
+    try:
+        with TestClient(app) as client:
+            response = client.get("/health/consumer")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body == {
+            "stream_length": 0,
+            "pending_count": 0,
+            "lag": None,
+            "consumers": [],
+        }
+    finally:
+        app.dependency_overrides.clear()

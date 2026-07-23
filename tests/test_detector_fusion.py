@@ -25,9 +25,7 @@ def _stable_sample(i: int) -> BucketSample:
 STABLE_HISTORY_15 = [_stable_sample(i) for i in range(15)]
 STABLE_HISTORY_30 = [_stable_sample(i) for i in range(30)]
 
-EXTREME_SPIKE = BucketSample(
-    request_count=100, error_count=90, p50=800.0, p95=2000.0, p99=3000.0
-)
+EXTREME_SPIKE = BucketSample(request_count=100, error_count=90, p50=800.0, p95=2000.0, p99=3000.0)
 
 
 def _fuse(current: BucketSample, history: list[BucketSample]) -> list:

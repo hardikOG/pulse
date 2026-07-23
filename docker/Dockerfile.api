@@ -11,6 +11,9 @@ COPY db ./db
 COPY dashboard ./dashboard
 COPY schemas.py .
 
+RUN useradd --create-home --shell /usr/sbin/nologin pulse
+USER pulse
+
 EXPOSE 8000
 
 CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]

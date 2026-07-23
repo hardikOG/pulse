@@ -76,6 +76,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pulse}:${POSTGRES_PASSWORD:-pulse}@postgres:5432/${POSTGRES_DB:-pulse}
       REDIS_URL: redis://redis:6379/0
+    # --output defaults to a path relative to the container's own /app WORKDIR, which
+    # the /host mount below does not cover — without this override the report is
+    # written inside the ephemeral container and lost the moment --rm removes it,
+    # never reaching the repo root the README/docs/DEPLOY.md instructions promise.
+    command: ["--output", "/host/benchmark_report.md"]
     volumes:
       - ./:/host
     depends_on:

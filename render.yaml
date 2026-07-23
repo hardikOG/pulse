@@ -1,0 +1,56 @@
+# Render Blueprint — best-effort starting point, not a verified-working config.
+# Render's managed-Redis product naming and free-tier availability have changed over
+# time; check https://render.com/docs/blueprint-spec against this file before relying
+# on it, and see docs/DEPLOY.md for the full walkthrough plus the DATABASE_URL scheme
+# fix every Render/Railway deploy needs (postgres:// -> postgresql+psycopg://).
+
+databases:
+  - name: pulse-postgres
+    databaseName: pulse
+    user: pulse
+    plan: free
+
+services:
+  - type: redis
+    name: pulse-redis
+    plan: free
+    ipAllowList: []
+
+  - type: web
+    name: pulse-api
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile.api
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pulse-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: pulse-redis
+          property: connectionString
+      - key: LOG_LEVEL
+        value: INFO
+
+  - type: worker
+    name: pulse-consumer
+    runtime: docker
+    dockerfilePath: ./docker/Dockerfile.consumer
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pulse-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: pulse-redis
+          property: connectionString
+      - key: LOG_LEVEL
+        value: INFO

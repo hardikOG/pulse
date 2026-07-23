@@ -49,6 +49,7 @@ def test_every_scenario_has_at_least_one_labeled_anomaly() -> None:
 def test_anomaly_injections_fit_within_live_duration() -> None:
     for scenario in SCENARIOS.values():
         for injection in scenario.anomalies:
-            assert injection.offset_seconds + injection.duration_seconds <= scenario.live_duration_seconds
+            injection_end = injection.offset_seconds + injection.duration_seconds
+            assert injection_end <= scenario.live_duration_seconds
             assert injection.service in scenario.services
             assert injection.endpoint in scenario.services[injection.service]

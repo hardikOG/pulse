@@ -59,9 +59,7 @@ def detect_anomalies(
             )
         )
 
-    z_error = zscore_detect(
-        current.error_rate, error_rate_history, zscore_threshold, min_history
-    )
+    z_error = zscore_detect(current.error_rate, error_rate_history, zscore_threshold, min_history)
     if z_error is not None:
         findings.append(
             Finding(
@@ -72,9 +70,7 @@ def detect_anomalies(
             )
         )
 
-    e_latency = ewma_detect(
-        current.p95, latency_history, ewma_alpha, zscore_threshold, min_history
-    )
+    e_latency = ewma_detect(current.p95, latency_history, ewma_alpha, zscore_threshold, min_history)
     if e_latency is not None:
         findings.append(
             Finding(

@@ -11,4 +11,7 @@ COPY core ./core
 COPY db ./db
 COPY schemas.py .
 
+RUN useradd --create-home --shell /usr/sbin/nologin pulse
+USER pulse
+
 CMD ["python", "-m", "consumer.main"]

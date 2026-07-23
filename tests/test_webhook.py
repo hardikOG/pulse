@@ -107,6 +107,8 @@ async def test_dispatch_webhook_logs_when_exhausted() -> None:
     await dispatch_webhook(client, _settings(), {"id": 7}, logger)
 
     exhausted_calls = [
-        call for call in logger.error.call_args_list if call.args[0] == "webhook delivery exhausted retries"
+        call
+        for call in logger.error.call_args_list
+        if call.args[0] == "webhook delivery exhausted retries"
     ]
     assert len(exhausted_calls) == 1

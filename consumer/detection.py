@@ -183,7 +183,5 @@ async def run_detection_for_bucket(
     except Exception as exc:  # noqa: BLE001 - detection is best-effort by design
         logger.error(
             "anomaly detection failed, skipping",
-            extra={
-                "extra_fields": {"service": service, "endpoint": endpoint, "error": str(exc)}
-            },
+            extra={"extra_fields": {"service": service, "endpoint": endpoint, "error": str(exc)}},
         )

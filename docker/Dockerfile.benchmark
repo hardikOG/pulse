@@ -11,4 +11,9 @@ COPY core ./core
 COPY db ./db
 COPY schemas.py .
 
+# Deliberately stays root, unlike Dockerfile.api/Dockerfile.consumer: this container
+# writes its report to a bind-mounted host directory (docker-compose.yml's /host
+# mount), and a non-root container UID isn't guaranteed to have write access to that
+# mount across host platforms without extra UID-mapping setup this project doesn't
+# otherwise need.
 ENTRYPOINT ["python", "-m", "benchmark.run"]

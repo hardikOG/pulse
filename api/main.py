@@ -6,7 +6,7 @@ consumer (the slow path).
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, MutableMapping
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from pathlib import Path
@@ -41,7 +41,9 @@ from api.responses import (
 )
 from core.config import get_settings
 from core.logging import get_logger
+from core.protocol import LIVE_UPDATES_SCHEMA_VERSION
 from core.redis_client import make_redis_client
+from core.redis_lag import get_consumer_info, get_lag_info
 from db.session import make_engine, make_session_factory
 from schemas import EventIn
 
@@ -67,7 +69,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     Outputs: yields control while the app serves requests; no return value.
     Complexity: O(1).
     Failure cases: none — both clients are constructed lazily and do not connect
-        eagerly.
+        eagerly. Shutdown awaits the cancelled fanout task before closing the Redis
+        connection it uses — closing it first would race the task's own cleanup
+        (unsubscribe + aclose in its finally block) against this function closing the
+        same connection out from under it.
     """
     app.state.redis = make_redis_client(settings)
     engine = make_engine(settings)
@@ -86,6 +91,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         fanout_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await fanout_task
         with suppress(Exception):
             await pubsub_redis.aclose()
         await app.state.redis.aclose()
@@ -109,7 +116,10 @@ async def _pubsub_fanout(app: FastAPI, pubsub_redis: Redis) -> None:
     Failure cases: never raises — a send failure to one client (e.g. it disconnected
         without the server noticing yet) is caught and that client is dropped from the
         set; a RedisError (e.g. Redis unreachable at startup) is logged and the task
-        exits rather than crashing.
+        exits rather than crashing. Iterates over a snapshot of the client set (not the
+        live set) since the /ws route can concurrently add/discard from it between
+        awaits in this loop — iterating the live set directly would raise
+        "Set changed size during iteration" and kill this task permanently.
     """
     try:
         pubsub = pubsub_redis.pubsub()
@@ -131,7 +141,7 @@ async def _pubsub_fanout(app: FastAPI, pubsub_redis: Redis) -> None:
             if message is None:
                 continue
             dead_clients = set()
-            for client in app.state.websocket_clients:
+            for client in list(app.state.websocket_clients):
                 try:
                     await client.send_text(message["data"])
                 except Exception:  # noqa: BLE001 - a dead client must not break fanout for the rest
@@ -205,7 +215,7 @@ class RequestLoggingMiddleware:
         start = time.perf_counter()
         status_code = 500
 
-        async def send_wrapper(message: dict[str, Any]) -> None:
+        async def send_wrapper(message: MutableMapping[str, Any]) -> None:
             nonlocal status_code
             if message["type"] == "http.response.start":
                 status_code = message["status"]
@@ -260,6 +270,42 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/health/consumer")
+async def health_consumer(redis_client: Redis = Depends(get_redis)) -> dict[str, Any]:
+    """Operational visibility into whether the consumer process is keeping up.
+
+    Purpose: unlike GET /health (pure API-process liveness), this reports the slow
+        path's actual health via Redis — stream backlog/lag (is work piling up?) and
+        per-consumer idle time (is a consumer still actively reading at all?). A
+        consumer group can show zero lag simply because nothing has been produced
+        recently, so idle_ms per consumer is included specifically to distinguish
+        "caught up" from "not running" (see core/redis_lag.get_consumer_info).
+        Deliberately reports raw measured numbers rather than a computed up/down
+        verdict — see the project's honest-benchmark stance in
+        docs/private/ARCHITECTURE_LEDGER.md: an arbitrary staleness threshold here
+        would be exactly the kind of asserted-not-measured claim that stance rejects.
+    Inputs: redis_client — injected Redis client (the API's own, not the consumer's).
+    Outputs: {"stream_length", "pending_count", "lag", "consumers": [{"name",
+        "pending", "idle_ms"}, ...]}. Always HTTP 200 — both get_lag_info and
+        get_consumer_info are best-effort and never raise.
+    Complexity: O(1) plus O(c) in consumer count, c typically 1.
+    Failure cases: none — an unreachable Redis or a group that hasn't been created
+        yet (consumer never booted) yields zeros/empty list, not an error.
+    """
+    lag_info = await get_lag_info(redis_client, settings.event_stream, settings.consumer_group)
+    consumers = await get_consumer_info(
+        redis_client, settings.event_stream, settings.consumer_group
+    )
+    return {
+        "stream_length": lag_info.stream_length,
+        "pending_count": lag_info.pending_count,
+        "lag": lag_info.lag,
+        "consumers": [
+            {"name": c.name, "pending": c.pending, "idle_ms": c.idle_ms} for c in consumers
+        ],
+    }
+
+
 @app.get("/", include_in_schema=False)
 async def dashboard() -> FileResponse:
     """Serve the single-file dashboard frontend.
@@ -276,10 +322,30 @@ async def dashboard() -> FileResponse:
     return FileResponse(DASHBOARD_PATH)
 
 
-@app.post("/events", status_code=status.HTTP_202_ACCEPTED)
-async def ingest_event(
-    event: EventIn, redis_client: Redis = Depends(get_redis)
-) -> dict[str, str]:
+@app.post(
+    "/events",
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        202: {
+            "description": "Event accepted and buffered onto the Redis stream.",
+            "content": {
+                "application/json": {
+                    "example": {"status": "accepted", "stream_id": "1735732800000-0"}
+                }
+            },
+        },
+        422: {
+            "description": "Validation failed (missing field, out-of-range status_code, "
+            "negative latency_ms, blank service/endpoint, or a ts too far in the future).",
+        },
+        503: {
+            "description": "The Redis stream buffer is unreachable — the event was NOT "
+            "durably buffered and was not silently dropped.",
+            "content": {"application/json": {"example": {"detail": "event buffer unavailable"}}},
+        },
+    },
+)
+async def ingest_event(event: EventIn, redis_client: Redis = Depends(get_redis)) -> dict[str, str]:
     """Validate an incoming event and push it onto the Redis stream buffer.
 
     Purpose: the entire fast path — validate, buffer, return. No aggregation, no DB
@@ -300,7 +366,10 @@ async def ingest_event(
         "ts": event.ts.isoformat(),
     }
     try:
-        stream_id = await redis_client.xadd(settings.event_stream, fields)
+        # redis-py's xadd stub takes an invariant dict[<broad union>, <broad union>], which
+        # a dict[str, str] can never satisfy under mypy's invariance rules even though every
+        # str/str pair is a valid member at runtime — a stub limitation, not a real type error.
+        stream_id = await redis_client.xadd(settings.event_stream, fields)  # type: ignore[arg-type]
     except RedisError as exc:
         logger.error(
             "stream push failed",
@@ -369,9 +438,7 @@ async def get_endpoints(
     Complexity: two aggregate queries over the metrics table.
     Failure cases: none.
     """
-    rows, total, _, _ = list_endpoints(
-        session, service, start, end, status_class, limit, offset
-    )
+    rows, total, _, _ = list_endpoints(session, service, start, end, status_class, limit, offset)
     items = [
         EndpointSummary(
             service=row.service,
@@ -388,7 +455,16 @@ async def get_endpoints(
     )
 
 
-@app.get("/services/{service}/metrics", response_model=ServiceDetailResponse)
+@app.get(
+    "/services/{service}/metrics",
+    response_model=ServiceDetailResponse,
+    responses={
+        404: {
+            "description": "The service has no rows in the requested time range.",
+            "content": {"application/json": {"example": {"detail": "service not found"}}},
+        }
+    },
+)
 async def get_service_detail(
     service: str,
     start: datetime | None = Query(default=None),
@@ -477,6 +553,7 @@ async def websocket_live_updates(websocket: WebSocket) -> None:
         rows, _, _, _ = list_services(session, None, None, "all", 100, 0)
         snapshot = {
             "type": "snapshot",
+            "schema_version": LIVE_UPDATES_SCHEMA_VERSION,
             "services": [
                 {
                     "service": row.service,

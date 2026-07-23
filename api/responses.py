@@ -12,7 +12,7 @@ never-merged percentiles only appear in MetricPoint, one per-minute-per-endpoint
 
 from datetime import datetime
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class PaginationMeta(BaseModel):
@@ -30,6 +30,23 @@ class ServiceSummary(BaseModel):
 
 
 class ServiceListResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "items": [
+                    {
+                        "service": "checkout",
+                        "request_count": 5230,
+                        "error_count": 12,
+                        "error_rate": 0.0023,
+                        "last_seen": "2026-01-01T12:34:00Z",
+                    }
+                ],
+                "pagination": {"total": 1, "limit": 20, "offset": 0},
+            }
+        }
+    )
+
     items: list[ServiceSummary]
     pagination: PaginationMeta
 
@@ -44,6 +61,24 @@ class EndpointSummary(BaseModel):
 
 
 class EndpointListResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "items": [
+                    {
+                        "service": "checkout",
+                        "endpoint": "/api/pay",
+                        "request_count": 1840,
+                        "error_count": 4,
+                        "error_rate": 0.0022,
+                        "last_seen": "2026-01-01T12:34:00Z",
+                    }
+                ],
+                "pagination": {"total": 1, "limit": 20, "offset": 0},
+            }
+        }
+    )
+
     items: list[EndpointSummary]
     pagination: PaginationMeta
 
@@ -66,6 +101,35 @@ class EndpointSeries(BaseModel):
 
 
 class ServiceDetailResponse(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "service": "checkout",
+                "request_count": 1840,
+                "error_count": 4,
+                "error_rate": 0.0022,
+                "endpoints": [
+                    {
+                        "endpoint": "/api/pay",
+                        "request_count": 1840,
+                        "error_count": 4,
+                        "error_rate": 0.0022,
+                        "series": [
+                            {
+                                "minute_bucket": "2026-01-01T12:34:00Z",
+                                "request_count": 62,
+                                "error_count": 1,
+                                "p50": 41.2,
+                                "p95": 118.7,
+                                "p99": 203.4,
+                            }
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
     service: str
     request_count: int
     error_count: int

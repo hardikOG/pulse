@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Pulse</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<!-- Chart.js 4 does not bundle time-scale support — scales.x.type: "time" (used by
+     createEndpointChart below) throws "date adapter" errors without this. -->
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 <style>
   :root {
     --bg: #0b0e14;

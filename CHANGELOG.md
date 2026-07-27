@@ -3,6 +3,16 @@
 All notable changes to Pulse are documented here. This project follows the
 architecture and design principles laid out in the README and `docs/ARCHITECTURE.md`.
 
+## [1.0.2] — Dashboard chart fix
+
+### Fixed
+- The per-endpoint latency chart never actually rendered in any real browser —
+  Chart.js 4 requires a separate date-adapter package for `scales.x.type: "time"`,
+  which `dashboard/index.html` never loaded. Found by inspecting the live deployed
+  dashboard directly, since the automated test suite is entirely Python-side and
+  never executes the dashboard's JavaScript. Fixed by loading
+  `chartjs-adapter-date-fns` alongside Chart.js.
+
 ## [1.0.1] — Render deployment fix
 
 ### Added

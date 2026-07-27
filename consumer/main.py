@@ -45,6 +45,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from consumer.aggregator import Rollup, bucket_for, compute_rollup, is_error
 from consumer.broadcast import build_lag_message, build_metric_point_message, publish
 from consumer.detection import run_detection_for_bucket
+from consumer.health_server import maybe_start_health_server
 from core.config import Settings, get_settings
 from core.logging import get_logger
 from core.redis_client import make_redis_client
@@ -550,6 +551,7 @@ def run() -> None:
     """
     settings = get_settings()
     logger = get_logger("pulse.consumer", settings.log_level)
+    maybe_start_health_server(logger)
     asyncio.run(_run_async(settings, logger))
 
 

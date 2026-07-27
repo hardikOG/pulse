@@ -36,12 +36,19 @@ services:
       - key: LOG_LEVEL
         value: INFO
 
-  - type: worker
+  # Declared as `web`, not `worker`, deliberately: Render's Background Worker product
+  # has no free tier (minimum $7/mo), but its Web Service product does, and the
+  # consumer accepts no HTTP traffic by design. consumer/health_server.py binds a
+  # trivial HTTP health endpoint to Render's injected $PORT purely to satisfy this
+  # platform requirement — inert everywhere else (docker-compose, plain `python -m
+  # consumer.main`), since PORT is never set there. See docs/DEPLOY.md.
+  - type: web
     name: pulse-consumer
     runtime: docker
     dockerfilePath: ./docker/Dockerfile.consumer
     dockerContext: .
     plan: free
+    healthCheckPath: /
     envVars:
       - key: DATABASE_URL
         fromDatabase:

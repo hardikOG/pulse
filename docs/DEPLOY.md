@@ -88,13 +88,23 @@ before use, since Render's managed-Redis product naming (`redis` vs. "Key Value"
 free-tier availability have both changed over time.
 
 1. In the Render dashboard: **New → Blueprint**, point it at this repo.
-2. Render will parse `render.yaml` and propose three resources: a Postgres database, a
-   Redis (or Key Value) instance, a web service (`pulse-api`, `docker/Dockerfile.api`),
-   and a background worker (`pulse-consumer`, `docker/Dockerfile.consumer`).
+2. Render will parse `render.yaml` and propose four resources: a Postgres database, a
+   Redis (or Key Value) instance, and two **Web Services** — `pulse-api`
+   (`docker/Dockerfile.api`) and `pulse-consumer` (`docker/Dockerfile.consumer`).
 3. Apply the blueprint.
 4. After the Postgres instance is provisioned, open its connection string and apply
    the [scheme fix](#the-database_url-scheme-gotcha) to both the `pulse-api` and
    `pulse-consumer` services' `DATABASE_URL` environment variable.
+
+**Why `pulse-consumer` is declared as a Web Service, not a Background Worker:**
+Render's Background Worker product has no free tier (a paid Starter instance is the
+minimum, currently $7/mo) — confirmed directly against the live account this project
+was deployed from, not assumed from documentation. The consumer accepts no HTTP
+traffic by design, but `consumer/health_server.py` binds a trivial
+`{"status": "ok"}` HTTP endpoint to Render's injected `$PORT` env var purely so the
+platform's port-scan/health-check for its free Web Service tier passes. That module
+is completely inert everywhere else — `docker-compose.yml`, a plain
+`python -m consumer.main` — since `PORT` is never set in either of those contexts.
 5. Deploy.
 
 ## The DATABASE_URL scheme gotcha

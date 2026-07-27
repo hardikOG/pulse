@@ -3,6 +3,18 @@
 All notable changes to Pulse are documented here. This project follows the
 architecture and design principles laid out in the README and `docs/ARCHITECTURE.md`.
 
+## [1.0.1] — Render deployment fix
+
+### Added
+- `consumer/health_server.py`: a minimal, dependency-free HTTP health endpoint the
+  consumer binds only when a `PORT` environment variable is present. Exists solely so
+  the consumer can run on Render's free Web Service tier — Render's Background Worker
+  product (the "correct" fit for a process that accepts no HTTP traffic) has no free
+  tier. Fully inert under `docker-compose.yml` or a plain `python -m consumer.main`,
+  where `PORT` is never set.
+- `render.yaml`'s `pulse-consumer` service is now declared as `type: web` (was
+  `type: worker`) with `healthCheckPath: /`, matching the above.
+
 ## [1.0.0] — Initial release
 
 The first complete, benchmarked, documented release: a self-hosted API observability

@@ -25,7 +25,7 @@ guaranteed sequence of exact button labels.
 
 ## Local (Docker)
 
-The primary, fully-verified deployment path — see the [README](../README.md#installation).
+The primary, fully-verified deployment path — see the [README](../README.md#quickstart).
 
 ```bash
 git clone https://github.com/hardikOG/pulse.git

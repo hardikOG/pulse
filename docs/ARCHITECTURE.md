@@ -164,7 +164,7 @@ the schema) and a `reason` string stating in plain language which signal fired a
 how much — an anomaly row is never just a bare score.
 
 **Known false-positive/false-negative characteristics** (see
-[Benchmark results](../README.md#benchmark-results) for the measured numbers this
+[Performance](../README.md#performance) for the measured numbers this
 predicts and confirms):
 - A purely adaptive rolling baseline "forgets" a sustained outage after roughly one
   window's worth of buckets, since the elevated values become the new normal —
